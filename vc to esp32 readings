@@ -1,0 +1,58 @@
+#define CALIPER_DATA  19
+#define CALIPER_CLOCK 18
+
+volatile uint32_t data = 0;
+volatile int bitCount = 0;
+volatile bool newData = false;
+
+void IRAM_ATTR clockISR()
+{
+  int bit = digitalRead(CALIPER_DATA);
+
+  data |= ((uint32_t)bit << bitCount);
+  bitCount++;
+
+  if (bitCount >= 24)
+  {
+    newData = true;
+    bitCount = 0;
+  }
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  pinMode(CALIPER_DATA, INPUT);
+  pinMode(CALIPER_CLOCK, INPUT);
+
+  attachInterrupt(
+    digitalPinToInterrupt(CALIPER_CLOCK),
+    clockISR,
+    FALLING
+  );
+
+  Serial.println("Vernier Caliper Receiver Started");
+}
+
+void loop()
+{
+  if (newData)
+  {
+    noInterrupts();
+
+    uint32_t receivedData = data;
+    data = 0;
+    newData = false;
+
+    interrupts();
+
+    Serial.print("24-bit DATA: ");
+    Serial.println(receivedData, BIN);
+
+    Serial.print("HEX: 0x");
+    Serial.println(receivedData, HEX);
+
+    Serial.println("--------------------");
+  }
+}
