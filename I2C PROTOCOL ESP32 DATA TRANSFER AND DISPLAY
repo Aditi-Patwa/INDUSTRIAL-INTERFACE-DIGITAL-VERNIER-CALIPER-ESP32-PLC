@@ -1,0 +1,113 @@
+#define CALIPER_CLOCK_PIN 18
+#define CALIPER_DATA_PIN 19
+#define SCALE_RX_PIN 16
+#define SCALE_TX_PIN 17
+#include <Wire.h>
+
+#define I2C_ADDRESS 0x08
+
+struct Measurement {
+  float height;
+  float weight;
+};
+
+Measurement dataToSend;
+
+// ---------- Caliper ----------
+volatile uint32_t caliperRaw = 0;
+volatile uint8_t caliperBitCount = 0;
+volatile bool caliperDataReady = false;
+volatile unsigned long lastClockEdge = 0;
+volatile unsigned long isrTriggerCount = 0;   // NEW: debug counter
+
+float heightMM = 0.0;
+
+void IRAM_ATTR caliperClockISR() {
+  isrTriggerCount++;   // NEW: count every clock edge received
+  unsigned long now = micros();
+  if (now - lastClockEdge > 2000) {
+    caliperBitCount = 0;
+    caliperRaw = 0;
+  }
+  lastClockEdge = now;
+  bool bit = !digitalRead(CALIPER_DATA_PIN);
+  if (caliperBitCount < 24) {
+    caliperRaw |= ((uint32_t)bit << caliperBitCount);
+    caliperBitCount++;
+    if (caliperBitCount == 24)
+      caliperDataReady = true;
+  }
+}
+
+float decodeCaliperToMM(uint32_t raw) {
+  bool negative = raw & (1UL << 20);
+  uint32_t magnitude = raw & 0xFFFFF;
+  float mm = magnitude / 200.0;
+  if (negative)
+    mm = -mm;
+  return mm;
+}
+
+// ---------- Scale ----------
+HardwareSerial ScaleSerial(1);
+String scaleBuffer = "";
+float weightGrams = 0.0;
+
+void parseScaleFrame(String frame) {
+  frame.trim();
+  if (frame.length() > 0) {
+    weightGrams = frame.toFloat();
+  }
+}
+
+void requestEvent() {
+  dataToSend.height = heightMM;
+  dataToSend.weight = weightGrams;
+  Wire.write((uint8_t *)&dataToSend, sizeof(dataToSend));
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  Wire.begin(I2C_ADDRESS);
+  Wire.onRequest(requestEvent);
+
+  pinMode(CALIPER_CLOCK_PIN, INPUT);
+  pinMode(CALIPER_DATA_PIN, INPUT);
+  attachInterrupt(digitalPinToInterrupt(CALIPER_CLOCK_PIN), caliperClockISR, RISING);
+
+  ScaleSerial.begin(9600, SERIAL_8N1, SCALE_RX_PIN, SCALE_TX_PIN);
+
+  Serial.println("Waiting for Vernier and Scale...");
+}
+
+void loop() {
+  if (caliperDataReady) {
+    noInterrupts();
+    uint32_t raw = caliperRaw;
+    caliperDataReady = false;
+    interrupts();
+    heightMM = decodeCaliperToMM(raw);
+  }
+
+  while (ScaleSerial.available()) {
+    char c = ScaleSerial.read();
+    if (c == '\n') {
+      parseScaleFrame(scaleBuffer);
+      scaleBuffer = "";
+    } else if (c != '\r') {
+      scaleBuffer += c;
+    }
+  }
+
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 500) {
+    lastPrint = millis();
+    Serial.print("Height = ");
+    Serial.print(heightMM, 2);
+    Serial.print(" mm | Weight = ");
+    Serial.print(weightGrams, 1);
+    Serial.print(" g | ISR triggers = ");     // NEW: debug output
+    Serial.println(isrTriggerCount);           // NEW: shows if clock pulses arriving at all
+  }
+}
