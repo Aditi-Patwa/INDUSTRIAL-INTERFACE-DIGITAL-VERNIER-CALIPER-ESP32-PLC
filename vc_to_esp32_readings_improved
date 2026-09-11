@@ -1,0 +1,118 @@
+/*
+  ESP32 Vernier Caliper Reader
+  
+  Pin Connections:
+    DATA  -> GPIO19 (via BC547 Inverter)
+    CLOCK -> GPIO18 (via BC547 Inverter)
+    
+  Protocol Specs:
+    - 24-bit frame sent LSB first.
+    - Bits 0-19: Measurement magnitude.
+    - Bit 20: Sign bit (1 = negative, 0 = positive).
+    - Frame pause: > 2ms gap indicates frame reset.
+*/
+
+#define CALIPER_CLOCK_PIN 18
+#define CALIPER_DATA_PIN 19
+
+// Shared volatile variables modified inside the Interrupt Service Routine (ISR)
+volatile uint32_t caliperRaw = 0;       // Stores incoming 24-bit binary sequence
+volatile uint8_t caliperBitCount = 0;    // Tracks current bit position (0 to 23)
+volatile bool caliperDataReady = false;  // Flag indicating a full 24-bit frame is captured
+volatile unsigned long lastClockEdge = 0;// Tracks timestamp of last clock pulse (microseconds)
+
+float heightMM = 0.0; // Calculated measurement output in millimeters
+
+// Interrupt Service Routine: Executed on every clock signal pulse
+void IRAM_ATTR caliperClockISR()
+{
+  unsigned long now = micros();
+
+  // Reset bit counter if frame pause between transmissions exceeds 2ms (2000 µs)
+  if (now - lastClockEdge > 2000)
+  {
+    caliperBitCount = 0;
+    caliperRaw = 0;
+  }
+
+  lastClockEdge = now;
+
+  // Read data bit and invert logic to counteract the hardware BC547 transistor inverter stage
+  bool bit = !digitalRead(CALIPER_DATA_PIN);
+
+  // Capture up to 24 bits
+  if (caliperBitCount < 24)
+  {
+    // Caliper sends LSB first — shift bit to its appropriate position in raw data uint32_t
+    caliperRaw |= ((uint32_t)bit << caliperBitCount);
+    caliperBitCount++;
+
+    // Signal data processing readiness once full packet arrives
+    if (caliperBitCount == 24)
+      caliperDataReady = true;
+  }
+}
+
+// Converts raw 24-bit integer output from caliper into floating-point millimeters
+float decodeCaliperToMM(uint32_t raw)
+{
+  // Bit 20 represents the sign (1 = Negative, 0 = Positive)
+  bool negative = raw & (1UL << 20);
+
+  // Extract raw magnitude (Bits 0-19). Clear bit 20 so sign bit doesn't alter magnitude.
+  uint32_t magnitude = raw & 0xFFFFF;
+  if (negative)
+  {
+    magnitude &= ~(1UL << 20); // Mask out sign bit
+  }
+
+  // Convert raw counts to millimeters based on caliper scaling ratio (200 counts per mm)
+  float mm = magnitude / 200.0;
+
+  // Apply negative sign if applicable
+  if (negative)
+    mm = -mm;
+
+  return mm;
+}
+
+void setup()
+{
+  Serial.begin(115200);
+
+  // Initialize GPIO pins as inputs
+  pinMode(CALIPER_CLOCK_PIN, INPUT);
+  pinMode(CALIPER_DATA_PIN, INPUT);
+
+  // Attach Hardware Interrupt to trigger ISR on clock signal rising edges
+  attachInterrupt(
+      digitalPinToInterrupt(CALIPER_CLOCK_PIN),
+      caliperClockISR,
+      RISING);
+
+  Serial.println("Waiting for Vernier...");
+}
+
+void loop()
+{
+  // Process measurement frame when flag is raised by ISR
+  if (caliperDataReady)
+  {
+    // Atomic read: Disable interrupts while copying shared multi-byte data to avoid data races
+    noInterrupts();
+    uint32_t raw = caliperRaw;
+    caliperDataReady = false;
+    interrupts();
+
+    // Decode binary data to millimeters
+    heightMM = decodeCaliperToMM(raw);
+
+    // Output formatted value to Serial Monitor
+    Serial.print("Height = ");
+    Serial.print(heightMM, 2);
+    Serial.println(" mm");
+
+    // Optional delay to throttle serial update rates
+    delay(1000);
+  }
+}
