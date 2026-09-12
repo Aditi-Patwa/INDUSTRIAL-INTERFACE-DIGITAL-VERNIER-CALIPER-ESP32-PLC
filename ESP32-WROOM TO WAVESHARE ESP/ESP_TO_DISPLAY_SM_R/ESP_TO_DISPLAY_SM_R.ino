@@ -1,0 +1,132 @@
+/*
+   Waveshare ESP32-S3
+   ESP-NOW Receiver
+
+   Receives Vernier reading from ESP32-WROOM
+   and displays it on Serial Monitor.
+*/
+
+#include <WiFi.h>
+#include <esp_now.h>
+
+
+// =====================================================
+// MUST MATCH THE TRANSMITTER DATA STRUCTURE
+// =====================================================
+
+typedef struct
+{
+  float vernierMM;
+
+} SensorData;
+
+
+SensorData receivedData;
+
+
+// =====================================================
+// ESP-NOW RECEIVE CALLBACK
+// =====================================================
+
+void onDataRecv(
+  const esp_now_recv_info_t *recv_info,
+  const uint8_t *incomingData,
+  int len
+)
+{
+  // Check packet size
+  if (len != sizeof(SensorData))
+  {
+    Serial.print("Invalid packet size: ");
+    Serial.println(len);
+    return;
+  }
+
+
+  // Copy received data
+  memcpy(
+    &receivedData,
+    incomingData,
+    sizeof(receivedData)
+  );
+
+
+  // Print sender MAC address
+  Serial.print("From: ");
+
+  for (int i = 0; i < 6; i++)
+  {
+    Serial.printf("%02X", recv_info->src_addr[i]);
+
+    if (i < 5)
+      Serial.print(":");
+  }
+
+  Serial.println();
+
+
+  // Print Vernier value
+  Serial.print("Received Height = ");
+  Serial.print(receivedData.vernierMM, 2);
+  Serial.println(" mm");
+
+  Serial.println("--------------------------");
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup()
+{
+  Serial.begin(115200);
+
+  delay(1000);
+
+  Serial.println();
+  Serial.println("=================================");
+  Serial.println(" WAVESHARE ESP32-S3");
+  Serial.println(" ESP-NOW RECEIVER");
+  Serial.println("=================================");
+
+
+  // Put ESP32-S3 into Station mode
+  WiFi.mode(WIFI_STA);
+
+  delay(100);
+
+
+  // Print this board's MAC address
+  Serial.print("RECEIVER MAC ADDRESS: ");
+  Serial.println(WiFi.macAddress());
+
+
+  // Initialize ESP-NOW
+  if (esp_now_init() != ESP_OK)
+  {
+    Serial.println("ERROR: ESP-NOW initialization failed!");
+    return;
+  }
+
+
+  // Register receive callback
+  esp_now_register_recv_cb(onDataRecv);
+
+
+  Serial.println();
+  Serial.println("ESP-NOW Receiver Ready");
+  Serial.println("Waiting for Vernier data...");
+  Serial.println();
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop()
+{
+  // Nothing needed here.
+  // Data is received in onDataRecv().
+}
