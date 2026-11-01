@@ -1,0 +1,259 @@
+/*
+  ESP32 Vernier Caliper Reader + ESP-NOW Transmitter
+
+  DATA  -> GPIO19
+  CLOCK -> GPIO18
+*/
+
+#include <WiFi.h>
+#include <esp_now.h>
+
+
+// =====================================================
+// VERNIER PINS
+// =====================================================
+
+#define CALIPER_CLOCK_PIN 18
+#define CALIPER_DATA_PIN  19
+
+
+// =====================================================
+// ESP-NOW DATA STRUCTURE
+// =====================================================
+
+typedef struct
+{
+  float vernierMM;
+
+} SensorData;
+
+
+SensorData txData;
+
+
+// =====================================================
+// WAVESHARE ESP32-S3 MAC ADDRESS
+// =====================================================
+
+// IMPORTANT:
+// Replace this with the actual MAC address of your
+// Waveshare ESP32-S3.
+
+uint8_t receiverMAC[] =
+{
+  0x58,0xE6,0xC5,0x72,0xE4,0x98
+};
+
+
+// =====================================================
+// VERNIER VARIABLES
+// =====================================================
+
+volatile uint32_t caliperRaw = 0;
+volatile uint8_t caliperBitCount = 0;
+volatile bool caliperDataReady = false;
+volatile unsigned long lastClockEdge = 0;
+
+float heightMM = 0.0;
+
+
+// =====================================================
+// VERNIER CLOCK INTERRUPT
+// =====================================================
+
+void IRAM_ATTR caliperClockISR()
+{
+  unsigned long now = micros();
+
+  // New frame detected
+  if (now - lastClockEdge > 2000)
+  {
+    caliperBitCount = 0;
+    caliperRaw = 0;
+  }
+
+  lastClockEdge = now;
+
+  // BC547 inverter
+  bool bit = !digitalRead(CALIPER_DATA_PIN);
+
+  if (caliperBitCount < 24)
+  {
+    // Vernier sends LSB first
+    caliperRaw |= ((uint32_t)bit << caliperBitCount);
+
+    caliperBitCount++;
+
+    if (caliperBitCount == 24)
+    {
+      caliperDataReady = true;
+    }
+  }
+}
+
+
+// =====================================================
+// DECODE VERNIER
+// =====================================================
+
+float decodeCaliperToMM(uint32_t raw)
+{
+  bool negative = raw & (1UL << 20);
+
+  uint32_t magnitude = raw & 0xFFFFF;
+
+  float mm = magnitude / 200.0;
+
+  if (negative)
+  {
+    mm = -mm;
+  }
+
+  return mm;
+}
+
+
+// =====================================================
+// SETUP
+// =====================================================
+
+void setup()
+{
+  Serial.begin(115200);
+
+  // -------------------------------------------------
+  // Vernier pins
+  // -------------------------------------------------
+
+  pinMode(CALIPER_CLOCK_PIN, INPUT);
+  pinMode(CALIPER_DATA_PIN, INPUT);
+
+  attachInterrupt(
+      digitalPinToInterrupt(CALIPER_CLOCK_PIN),
+      caliperClockISR,
+      RISING
+  );
+
+
+  // -------------------------------------------------
+  // ESP-NOW
+  // -------------------------------------------------
+
+  WiFi.mode(WIFI_STA);
+
+  Serial.println();
+  Serial.println("==============================");
+  Serial.println(" ESP32 VERNIER TRANSMITTER");
+  Serial.println("==============================");
+
+  Serial.print("WROOM MAC: ");
+  Serial.println(WiFi.macAddress());
+
+
+  // Initialize ESP-NOW
+
+  if (esp_now_init() != ESP_OK)
+  {
+    Serial.println("ESP-NOW initialization FAILED!");
+    return;
+  }
+
+
+  // -------------------------------------------------
+  // Add Waveshare ESP32-S3 peer
+  // -------------------------------------------------
+
+  esp_now_peer_info_t peerInfo = {};
+
+  memcpy(
+    peerInfo.peer_addr,
+    receiverMAC,
+    6
+  );
+
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+
+
+  if (esp_now_add_peer(&peerInfo) != ESP_OK)
+  {
+    Serial.println("Failed to add ESP-NOW peer!");
+    return;
+  }
+
+
+  Serial.println("ESP-NOW transmitter ready.");
+  Serial.println("Waiting for Vernier...");
+}
+
+
+// =====================================================
+// LOOP
+// =====================================================
+
+void loop()
+{
+  if (caliperDataReady)
+  {
+    // -------------------------------------------------
+    // Safely copy received frame
+    // -------------------------------------------------
+
+    noInterrupts();
+
+    uint32_t raw = caliperRaw;
+
+    caliperDataReady = false;
+
+    interrupts();
+
+
+    // -------------------------------------------------
+    // Decode Vernier
+    // -------------------------------------------------
+
+    heightMM = decodeCaliperToMM(raw);
+
+
+    // -------------------------------------------------
+    // Serial Monitor
+    // -------------------------------------------------
+
+    Serial.print("Height = ");
+    Serial.print(heightMM, 2);
+    Serial.println(" mm");
+
+
+    // -------------------------------------------------
+    // Prepare ESP-NOW data
+    // -------------------------------------------------
+
+    txData.vernierMM = heightMM;
+
+
+    // -------------------------------------------------
+    // Send ESP-NOW packet
+    // -------------------------------------------------
+
+    esp_err_t result = esp_now_send(
+        receiverMAC,
+        (uint8_t *)&txData,
+        sizeof(txData)
+    );
+
+
+    if (result == ESP_OK)
+    {
+      Serial.println("ESP-NOW: Data sent");
+    }
+    else
+    {
+      Serial.print("ESP-NOW send error: ");
+      Serial.println(result);
+    }
+
+    Serial.println();
+  }
+
+  delay(1000);
+}
